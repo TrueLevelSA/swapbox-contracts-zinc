@@ -1,0 +1,218 @@
+//!
+//! The 'swapbox' contract entry.
+//!
+mod types;
+
+use self::types::Address;
+use self::types::Machine;
+use std::collections::MTreeMap;
+
+// Default fee for machines buy/sell orders.
+pub const FEE_DEFAULT: u248 = 1000;
+
+// Fee granularity, fee will always be divided by this before being applied.
+// i.e. fee = 1000 -> 1000/10000 = 0.1 -> 10% fees.
+pub const FEE_GRANULARITY: u248 = 10000;
+
+//
+// Swapbox contract.
+//
+// References to `base token` refers to your desired fiat/stable token. The
+// contract must always own some of it to correctly submit orders.
+//
+contract Swapbox {
+    // owner of the contract, admin.
+    pub owner: Address;
+
+    // base token in which swapbox holds its funds.
+    pub base_token: Address;
+
+    // machine addresses, those are allowed for emitting orders.
+    pub machines: MTreeMap<Address, Machine>;
+
+    //
+    // Constructor.
+    // 
+    pub fn new(
+        base_currency: Address,
+        router: Address
+    ) -> Self {
+        Self {
+            owner: zksync::msg.sender,
+            base_token: base_currency,
+            machines: MTreeMap,
+        }
+    }
+
+    ///
+    /// Add a trusted machine.
+    ///
+    pub fn add_machine(
+        mut self,
+        machine_address: Address
+    ) {
+        self.require_owner();
+        require(!self.machines.contains(machine_address));
+        self.machines.insert(
+            machine_address,
+            Machine {
+                buy_fee: FEE_DEFAULT,
+                sell_fee: FEE_DEFAULT,
+            }
+        );
+    }
+
+    ///
+    /// Remove a trusted machine.
+    ///
+    pub fn remove_machine(
+        mut self,
+        machine_address: Address
+    ) {
+        self.require_owner();
+        self.machines.remove(machine_address);
+    }
+
+    ///
+    /// Edit a machine's fees.
+    ///
+    pub fn edit_machine_fees(
+        mut self,
+        machine_address: Address,
+        buy_fee: u248,
+        sell_fee: u248,
+    ) {
+        self.require_owner();
+        let (machine, exists) = self.machines.get(zksync::msg.sender);
+        require(exists, "machine address must exist.");
+        require(buy_fee < FEE_GRANULARITY, "buy fee must be under 100%");
+        require(sell_fee < FEE_GRANULARITY, "sell fee must be under 100%");
+        self.machines.insert(
+            machine_address,
+            Machine {
+                buy_fee: buy_fee,
+                sell_fee: sell_fee,
+            },
+        );
+    }
+
+    ///
+    /// Transfer ownership.
+    ///
+    pub fn transfer_ownership(
+        mut self,
+        new_owner: Address,
+    ) {
+        self.require_owner();
+        self.owner = new_owner;
+    }
+
+    /// -----------------------------------------------------------------------
+    /// Orders:
+    ///
+
+    ///
+    /// Submit a base token to ETH order.
+    ///
+    pub fn order_base_to_eth(
+        mut self,
+        amount_fiat: u248,
+        tolerance: u248,
+        user: Address
+    ) {
+        // Only allowed machines.
+        let machine = self.require_allowed_machine();
+
+        // compute order parameters
+        let net_amount = compute_net_amount(amount_fiat, machine.buy_fee);
+        let deadline = 0;
+        let amount_out_min = 0;
+        let path = [self.base_token, self.router.WETH()];
+
+        // approve router for net amount
+        self.base_token.approve(self.router, net_amount);
+
+        // swap base token for ETH
+        self.router.swapExactTokensForETH(net_amount, amount_out_min, path, zksync::msg.sender, deadline);
+        
+        //TODO: Emit event ? Is it relevant, possible ?
+    }
+
+
+    ///
+    /// Submit a ETH to base token order.
+    ///
+    pub fn order_eth_to_base(
+        mut self,
+        amount_fiat: u248,
+        user: Address,
+    ) {
+        // Only allowed machines.
+        let machine = self.require_allowed_machine();
+
+        // compute order parameters
+        let net_amount = compute_net_amount(amount_fiat, machine.sell_fee);
+        let deadline = 0; // ?
+        let amount_out_min = 0;
+        let path = [self.router.WETH(), self.base_token];
+
+        // swap 
+        //TODO: set msg.value to net_amount of ETH
+        self.router.swapExactETHForToken(
+            amount_out_min,
+            path,
+            zksync::msg.sender,
+            deadline
+        );
+
+        //TODO: send the changes, also handle fallback or whatever
+        let (user_balance, exists) = self.balances.get(msg.sender);
+        self.transfer(
+            user,
+            0x0,
+            user_balance,
+        );
+
+        //TODO: Emit event ? Is it relevant, possible ?
+    }
+
+    /// -----------------------------------------------------------------------
+    /// Custom requires:
+    ///
+
+    ///
+    /// Helper to check if message sender is an allowed machine
+    ///
+    /// It also returns the machine, for practical reasons.
+    /// TODO: Why do I need to create a variable here? 
+    ///
+    pub fn require_allowed_machine(mut self) -> Machine {
+        let (machine, exists) = self.machines.get(zksync::msg.sender);
+        require(exists, "machine must be allowed.");
+        machine
+    }
+
+    ///
+    /// Helper to check if message sender is the owner of the contract
+    ///
+    pub fn require_owner(mut self) {
+        require(zksync::msg.sender == self.owner, "must be the contract owner.");
+    }
+
+    /// -----------------------------------------------------------------------
+    /// Static utils:
+    ///
+
+    ///
+    /// Compute net amount. 
+    ///
+    /// Substract computed fees from a given amount, used in orders.
+    ///
+    fn compute_net_amount(
+        amount: u248,
+        fee: u248,
+    ) -> u248 {
+        amount - (amount * fee / FEE_GRANULARITY)
+    }
+
+}

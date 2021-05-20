@@ -1,0 +1,16 @@
+//!
+//! The Swapbox types.
+//!
+
+/// 
+/// The ETH address in the unsigned integer form.
+///
+pub type Address = u160;
+
+/// 
+/// The machine state.
+///
+pub struct Machine {
+    buy_fee: u248,
+    sell_fee: u248,
+}
